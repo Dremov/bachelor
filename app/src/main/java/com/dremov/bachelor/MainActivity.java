@@ -10,6 +10,8 @@ import android.util.Log;
 import android.view.SurfaceView;
 import android.view.WindowManager;
 
+import com.dremov.bachelor.util.Config;
+
 import org.opencv.android.BaseLoaderCallback;
 import org.opencv.android.CameraBridgeViewBase;
 import org.opencv.android.LoaderCallbackInterface;
@@ -21,19 +23,27 @@ import org.opencv.core.MatOfInt;
 import org.opencv.core.MatOfPoint;
 import org.opencv.core.MatOfPoint2f;
 import org.opencv.core.Point;
+import org.opencv.core.Rect;
 import org.opencv.core.Scalar;
 import org.opencv.core.Size;
 import org.opencv.imgproc.Imgproc;
+import org.opencv.video.BackgroundSubtractor;
+import org.opencv.video.BackgroundSubtractorMOG2;
+import org.opencv.video.Video;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.Vector;
 
 public class MainActivity extends AppCompatActivity implements CameraBridgeViewBase.CvCameraViewListener2 {
 
     private static final String TAG = MainActivity.class.getSimpleName();
 
-    private static final int CAPTURE_IMAGE_ACTIVITY_REQUEST_CODE = 100;
+    private Mat bufferImg;
+    private Mat mask;
+
+    private BackgroundSubtractorMOG2 bgMOG;// = Video.createBackgroundSubtractorMOG2();
 
     private CameraBridgeViewBase mOpenCvCameraView;
     private HandlerThread mBackgroundThread;
@@ -55,6 +65,7 @@ public class MainActivity extends AppCompatActivity implements CameraBridgeViewB
         mOpenCvCameraView = (CameraBridgeViewBase) findViewById(R.id.open_cv_view);
         mOpenCvCameraView.setVisibility(SurfaceView.VISIBLE);
         mOpenCvCameraView.setCvCameraViewListener(this);
+        mOpenCvCameraView.setMaxFrameSize(640, 480);
     }
 
     private BaseLoaderCallback mLoaderCallback = new BaseLoaderCallback(this) {
@@ -64,6 +75,8 @@ public class MainActivity extends AppCompatActivity implements CameraBridgeViewB
                 case LoaderCallbackInterface.SUCCESS: {
                     Log.i(TAG, "OpenCV loaded successfully");
                     mOpenCvCameraView.enableView();
+                    bgMOG = Video.createBackgroundSubtractorMOG2();
+                    mask = new Mat();
                 }
                 break;
                 default: {
@@ -74,6 +87,8 @@ public class MainActivity extends AppCompatActivity implements CameraBridgeViewB
         }
     };
 
+
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -83,9 +98,12 @@ public class MainActivity extends AppCompatActivity implements CameraBridgeViewB
         if (!OpenCVLoader.initDebug()) {
             Log.d(TAG, "Internal OpenCV library not found. Using OpenCV Manager for initialization");
             OpenCVLoader.initAsync(OpenCVLoader.OPENCV_VERSION_3_1_0, this, mLoaderCallback);
+
         } else {
             Log.d(TAG, "OpenCV library found inside package. Using it!");
             mLoaderCallback.onManagerConnected(LoaderCallbackInterface.SUCCESS);
+
+            bgMOG = Video.createBackgroundSubtractorMOG2();
         }
     }
 
@@ -102,12 +120,17 @@ public class MainActivity extends AppCompatActivity implements CameraBridgeViewB
     @Override
     public Mat onCameraFrame(CameraBridgeViewBase.CvCameraViewFrame inputFrame) {
 
-        final Mat frame = inputFrame.rgba();
+        if (bufferImg == null) {
+            bufferImg = inputFrame.gray();
+        }
+
+        final Mat frame = inputFrame.gray();
 
         Thread processingThread = new Thread(new Runnable() {
             @Override
             public void run() {
-                //findSquare(frame);
+                drawContours(frame);
+
             }
         });
         processingThread.setName("Processing Thread");
@@ -115,10 +138,9 @@ public class MainActivity extends AppCompatActivity implements CameraBridgeViewB
             processingThread.start();
         }
 
-        for (int i=0; i<squares.size() ; i++) {
-            Imgproc.drawContours(frame, squares, i, new Scalar(255, 0, 0), 1);
-        }
-        return frame;
+        bgMOG.apply(frame, mask, 0.8);
+
+        return mask;
     }
 
     @Override
@@ -148,28 +170,6 @@ public class MainActivity extends AppCompatActivity implements CameraBridgeViewB
         }
     }
 
-
-    void extractChannel(Mat source, Mat out, int channelNum) {
-        List<Mat> sourceChannels = new ArrayList<Mat>();
-        List<Mat> outChannel = new ArrayList<Mat>();
-
-        Core.split(source, sourceChannels);
-
-        outChannel.add(new Mat(sourceChannels.get(0).size(), sourceChannels.get(0).type()));
-
-        Core.mixChannels(sourceChannels, outChannel, new MatOfInt(channelNum, 0));
-
-        Core.merge(outChannel, out);
-    }
-
-    MatOfPoint approxPolyDP(MatOfPoint curve, double epsilon, boolean closed) {
-        MatOfPoint2f tempMat = new MatOfPoint2f();
-
-        Imgproc.approxPolyDP(new MatOfPoint2f(curve.toArray()), tempMat, epsilon, closed);
-
-        return new MatOfPoint(tempMat.toArray());
-    }
-
     private Thread getThreadByName(String threadName)
     {
         Thread __tmp = null;
@@ -179,5 +179,62 @@ public class MainActivity extends AppCompatActivity implements CameraBridgeViewB
             if (threadArray[i].getName().equals(threadName))
                 __tmp =  threadArray[i];
         return __tmp;
+    }
+
+    private void drawContours(Mat frame) {
+
+        Imgproc.findContours(mask, squares, new Mat(), Imgproc.RETR_LIST,
+                Imgproc.CHAIN_APPROX_SIMPLE);
+
+        int maxAreaIdx = -1;
+        Rect r = null;
+        Vector<Rect> rect_array = new Vector<Rect>();
+
+        for (int idx = 0; idx < squares.size(); idx++) {
+            Mat contour = squares.get(idx);
+            double contourarea = Imgproc.contourArea(contour);
+            if (contourarea > Config.MIN_BLOB_AREA && contourarea < Config.MAX_BLOB_AREA) {
+                // MIN_BLOB_AREA = contourarea;
+                maxAreaIdx = idx;
+                r = Imgproc.boundingRect(squares.get(maxAreaIdx));
+                rect_array.add(r);
+//                 Imgproc.drawContours(mask, squares, maxAreaIdx, new
+//                 Scalar(255, 255, 255));
+            }
+
+        }
+
+        for (int i=0; i<squares.size() ; i++) {
+            Imgproc.drawContours(frame, squares, i, new Scalar(255, 0, 0), 1);
+        }
+    }
+
+    public static Vector<Rect> detectionContours(Mat outmat) {
+        Mat v = new Mat();
+        Mat vv = outmat.clone();
+        List<MatOfPoint> contours = new ArrayList<MatOfPoint>();
+        Imgproc.findContours(vv, contours, v, Imgproc.RETR_LIST,
+                Imgproc.CHAIN_APPROX_SIMPLE);
+
+        int maxAreaIdx = -1;
+        Rect r = null;
+        Vector<Rect> rect_array = new Vector<Rect>();
+
+        for (int idx = 0; idx < contours.size(); idx++) {
+            Mat contour = contours.get(idx);
+            double contourarea = Imgproc.contourArea(contour);
+            if (contourarea > Config.MIN_BLOB_AREA && contourarea < Config.MAX_BLOB_AREA) {
+                // MIN_BLOB_AREA = contourarea;
+                maxAreaIdx = idx;
+                r = Imgproc.boundingRect(contours.get(maxAreaIdx));
+                rect_array.add(r);
+                // Imgproc.drawContours(imag, contours, maxAreaIdx, new
+                // Scalar(255, 255, 255));
+            }
+
+        }
+
+        v.release();
+        return rect_array;
     }
 }
